@@ -48,6 +48,8 @@ library(tidyverse)
 library(purrr)
 library(tokenizers)
 library(quanteda)
+library(cld2)
+library(textclean)
 library(spacyr)
 library(sophistication) # https://github.com/kbenoit/sophistication
 library(patchwork)
@@ -331,87 +333,330 @@ snips <- read_rds("./data/snippets_indicators.rds")
 
 # Draw coding samples ####
 
+set.seed(20250911)  # for reproducibility
+
 # Prepare population data
 pop <- snips %>% 
-  select(feedback_ref, snippet, policy_stage_short, snippet_entropy, snippet_flesch, snippet_entities, snippet_legalese) %>% 
+  select(feedback_ref, snippet, policy_stage_short, snippet_wc, snippet_entropy, snippet_flesch, snippet_entities, snippet_legalese) %>% 
   rename(id = feedback_ref,
          text = snippet,
          stage = policy_stage_short)
-names(pop) <- names(pop) %>% str_remove("snippet")
+names(pop) <- names(pop) %>% str_remove("snippet_")
 
 
-set.seed(123)  # for reproducibility
-N <- 300
-vars <- c("flesch", "legalese", "entities")
+# Filter population data
 
-# 1) Count strata and compute proportional targets
-targets <- fbs %>%
-  count(across(all_of(vars)), name = "n") %>%
-  mutate(prop   = n / sum(n),
-         target = floor(prop * N),
-         frac   = prop * N - target)
+pop <- pop %>% 
+  mutate(lang = detect_language(text)) %>% 
+  filter(lang == "en") %>% 
+  select(-lang) %>% 
+  filter(wc > 10) %>% # A.o. removes extreme legalese cases
+  mutate(flesch = ifelse(flesch < 0, 0, flesch), # Cap Flesch measures as in analysis (and to avoid oversampling of extreme cases)
+         flesch = ifelse(flesch > 100, 100, flesch)) %>% 
+  mutate(text = iconv(text, from = "latin1", to = "UTF-8"),
+         text = textclean::replace_non_ascii(text)) # Tackle (some) encoding issues - SHOULD BE DONE IN MAIN ANALYSES AS WELL!
 
-# 2) Cap targets by available n, then redistribute leftover to biggest fractions with slack
-targets <- targets %>%
-  mutate(target = pmin(target, n)) 
 
-leftover <- N - sum(targets$target)
-if (leftover > 0) {
-  targets <- targets %>%
-    mutate(slack = n - target) %>%
-    arrange(desc(frac)) %>%
-    mutate(add = as.integer(row_number() <= leftover & slack > 0),
-           target = target + add) %>%
-    select(-prop, -frac, -slack, -add)
-} else {
-  targets <- targets %>%
-    select(-prop, -frac)
+# Sampling
+# Reminder: Each coder should see 500 units that cover variation across all measures and balances the policy stages
+# Overlap sample of 100 obs with the same features
+
+# - > stratified sampling
+
+# Mark quintile bins for the the text measures + stratum ids (including stage)
+
+pop_binned <- pop %>%
+  mutate(
+    q_entropy  = ntile(`entropy`,  5),
+    q_flesch   = ntile(`flesch`,   5),
+    q_entities = ntile(`entities`, 5),
+    q_legalese = ntile(`legalese`, 5),
+    strata = interaction(stage, q_entropy, q_flesch, q_entities, q_legalese, drop = TRUE)
+  )
+
+
+# Stratum fill function
+# proportional integer allocation within a stage 
+# Given available counts per stratum (s), and a target size m,
+# allocate integers n_i with:
+#   - proportional to size,
+#   - capped by availability,
+#   - remainder distributed by largest fractional parts,
+#   - if caps reduce total, re-distribute to strata with remaining capacity
+
+alloc_counts <- function(s, m) {
+  if (sum(s) == 0 || m <= 0) return(rep(0L, length(s)))
+  # initial proportional allocation
+  p <- s / sum(s)
+  raw <- m * p
+  n <- pmin(s, floor(raw))
+  # distribute remainder by largest fractional part (Hamilton method)
+  rem <- m - sum(n)
+  if (rem > 0) {
+    frac <- raw - floor(raw)
+    # prefer strata with capacity left
+    cap_left <- s - n
+    frac[cap_left <= 0] <- -Inf
+    if (any(is.finite(frac))) {
+      add_ix <- order(frac, decreasing = TRUE)[seq_len(min(rem, sum(is.finite(frac))))]
+      n[add_ix] <- n[add_ix] + 1L
+    }
+  }
+  # if caps caused under-allocation, top up randomly among strata with capacity
+  deficit <- m - sum(n)
+  if (deficit > 0) {
+    cap_left <- s - n
+    pool <- which(cap_left > 0)
+    if (length(pool) > 0) {
+      # sample proportional to remaining capacity
+      probs <- cap_left[pool] / sum(cap_left[pool])
+      extra <- sample(pool, size = deficit, replace = FALSE, prob = probs)
+      tab <- table(extra)
+      n[as.integer(names(tab))] <- n[as.integer(names(tab))] + as.integer(tab)
+    }
+  }
+  n
 }
 
-# 3) Sample per stratum (n varies by group → use nest + map2)
-sampled_300 <- fbs %>%
-  inner_join(targets, by = vars) %>%
-  group_by(across(all_of(vars))) %>%
-  group_modify(~ {
-    n_take <- dplyr::first(.x$target)          # scalar per stratum
-    if (is.na(n_take) || n_take <= 0) return(.x[0, , drop = FALSE])
-    dplyr::slice_sample(.x, n = n_take)
-  }) %>%
-  ungroup() %>%
-  select(-n, -target)
+
+# Sampling function  within one stage, spreading across multi-way strata of the text measure values
+sample_one_stage <- function(df_stage, m) {
+  if (nrow(df_stage) == 0L || m <= 0L) return(df_stage[0, ])
+  
+  # counts per composite stratum (within this stage)
+  strata_counts <- df_stage %>%
+    dplyr::count(strata, name = "s")
+  
+  # integer allocation per stratum (proportional, capped by availability)
+  strata_counts <- strata_counts %>%
+    dplyr::mutate(n_take = alloc_counts(s, m)) %>%
+    dplyr::filter(n_take > 0L)
+  
+  # join plan, randomize within stratum, then keep first n_take rows per stratum
+  df_stage %>%
+    dplyr::inner_join(strata_counts, by = "strata") %>%
+    dplyr::group_by(strata) %>%
+    dplyr::mutate(.rand = runif(dplyr::n())) %>%
+    dplyr::arrange(.rand, .by_group = TRUE) %>%
+    dplyr::mutate(.rn = dplyr::row_number()) %>%
+    dplyr::filter(.rn <= dplyr::first(n_take)) %>%  # <- varies by group: OK in filter()
+    dplyr::ungroup() %>%
+    dplyr::select(-.rand, -.rn, -s, -n_take)
+}
+
+
+# Function: build one full sample with ~equal stage balance 
+take_one_sample <- function(df_remaining, total_n) {
+  # target per stage ~ equal split
+  stages <- df_remaining %>% count(stage, name = "avail")
+  # split total_n as evenly as possible across the 3 stages, favoring stages with availability
+  base <- floor(total_n / 3)
+  rem  <- total_n - base * 3
+  # distribute the remainder to the stages with most available rows
+  add <- rep(0L, nrow(stages))
+  if (rem > 0) {
+    add_ix <- order(stages$avail, decreasing = TRUE)[seq_len(rem)]
+    add[add_ix] <- 1L
+  }
+  targets <- pmin(stages$avail, base + add)
+  plan <- tibble(stage = stages$stage, target = targets)
+  
+  # sample within each stage using multi-way strata
+  sampled <- map2_dfr(
+    plan$stage, plan$target,
+    ~ df_remaining %>%
+      filter(stage == .x) %>%
+      sample_one_stage(m = .y)
+  )
+  
+  # If this falls short of the target (e.g., not enough availability in some strata/stages),
+  # top up from the remaining rows while preserving stage balance as far as possible.
+  short <- total_n - nrow(sampled)
+  if (short > 0) {
+    pool <- anti_join(df_remaining, sampled, by = "id")
+    # gentle bias toward under-represented stages in the current sample
+    have <- sampled %>% count(stage, name = "have")
+    want <- plan %>% left_join(have, by = "stage") %>% mutate(have = replace_na(have, 0L),
+                                                              gap = pmax(target - have, 0L))
+    pool <- pool %>% left_join(want %>% select(stage, gap), by = "stage")
+    # weight by (1 + gap) to favor stages needing top-up
+    probs <- (pool$gap + 1) / sum(pool$gap + 1)
+    extra_idx <- sample(seq_len(nrow(pool)), size = short, replace = FALSE, prob = probs)
+    sampled <- bind_rows(sampled, pool[extra_idx, ])
+  }
+  sampled
+}
+
+
+# Build four non-overlapping samples (100, 500, 500, 500)
+
+sizes <- c(100L, 500L, 500L, 500L)
+
+samples <- vector("list", length(sizes))
+remaining <- pop_binned
+
+for (i in seq_along(sizes)) {
+  samp_i <- take_one_sample(remaining, sizes[i])
+  samples[[i]] <- samp_i
+  remaining <- anti_join(remaining, samp_i, by = "id")  # ensure no overlap
+}
+
+samp1 <- samples[[1]]  # 100 rows
+samp2 <- samples[[2]]  # 500 rows
+samp3 <- samples[[3]]  # 500 rows
+samp4 <- samples[[4]]  # 500 rows
 
 
 
-# Prepare input for the app ####
 
-s <- sampled_300 %>% 
-  mutate(id = 1:nrow(.)) %>% 
-  select(id, legalese, entities, flesch, testtext) %>% 
-  rename(text = testtext)
+# Quick checks:
+lapply(list(samp1, samp2, samp3, samp4), \(x) count(x, stage) %>% mutate(p = n/sum(n)))
+lapply(list(samp1, samp2, samp3, samp4), \(x)
+       x %>% count(q_entropy, q_flesch, q_entities, q_legalese) %>% summarise(nonempty = sum(n > 0)))
 
-# Individual files
+  
 
-s %>% 
-  slice_sample(prop = 1) %>% # Shuffle rows
-  write.csv("./CONSULT-Dim-Model/coder0texts.csv",
+
+# Visual comparison of the samples and the population ####
+
+# Function to reshape the different data sets for ggplot
+to_long <- function(df, src) {
+  df %>%
+    transmute(
+      source  = src,
+      entropy = `entropy`,
+      flesch  = `flesch`,
+      entities= `entities`,
+      legalese= `legalese`
+    ) %>%
+    pivot_longer(cols = entropy:legalese, names_to = "metric", values_to = "value")
+}
+
+# Stacking the samples and population
+all_long <- bind_rows(
+  to_long(pop,   "Population"),
+  to_long(samp1, "Sample 1 (overlap, n = 100)"),
+  to_long(samp2, "Sample 2 (n= 500)"),
+  to_long(samp3, "Sample 3 (n= 500)"),
+  to_long(samp4, "Sample 4 (n= 500)")
+) %>%
+  mutate(
+    metric = factor(metric, levels = c("entropy","flesch","entities","legalese")),
+    source = factor(source, levels = c("Population","Sample 1 (overlap, n = 100)","Sample 2 (n= 500)","Sample 3 (n= 500)","Sample 4 (n= 500)"))
+  )
+
+# Plot comparison
+ggplot() +
+  # population baseline (black line, no fill)
+  geom_density(
+    data = filter(all_long, source == "Population"),
+    aes(x = value),
+    linewidth = 2, color = "black"
+  ) +
+  # samples (transparent fills)
+  geom_density(
+    data = filter(all_long, source != "Population"),
+    aes(x = value, fill = source),
+    color = NA,
+    alpha = 0.35
+  ) +
+  facet_wrap(~ metric, scales = "free", ncol = 2) +
+  labs(
+    x = NULL, y = "Density",
+    fill = NULL,
+    title = "Distribution of the text measures in snippet population and coder samples",
+    subtitle = "Population shown as black outline; samples mark by fill color"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold.italic"))
+
+ggsave(
+  filename = "./plots/MeasureDistributionInCoderSamples.png",
+  width = 30, height = 25, units = "cm", dpi = 300
+)
+
+
+# Visualize distribution across policy stages
+
+tag_stage <- function(df, src) df %>% transmute(source = src, stage)
+
+pop_vs_samples <- bind_rows(
+  tag_stage(pop,   "Population"),
+  tag_stage(samp1, "Sample 1"),
+  tag_stage(samp2, "Sample 2"),
+  tag_stage(samp3, "Sample 3"),
+  tag_stage(samp4, "Sample 4")
+) %>%
+  mutate(source = factor(source, levels = c("Population","Sample 1","Sample 2","Sample 3","Sample 4")))
+
+
+counts <- 
+  pop_vs_samples %>%
+  count(source, stage, name = "n") %>%
+  group_by(source) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+
+ggplot(counts, aes(x = stage, y = prop, fill = source)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, color = NA) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(
+    values = c(
+      "Population" = "grey30",          # dark grey
+      "Sample 1"  = "#1b9e77",          # teal-green
+      "Sample 2"  = "#d95f02",          # orange
+      "Sample 3"  = "#7570b3",          # purple
+      "Sample 4"  = "#e7298a"           # magenta
+    )
+  ) +
+  labs(x = NULL, y = "Share of observations\n", fill = NULL,
+       title = "Distribution of policy stages in population and coder samples") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+ggsave(
+  filename = "./plots/PolicyStagesInCoderSamples.png",
+  width = 30, height = 12, units = "cm", dpi = 300
+)
+
+
+
+# Finalize and export coder samples ####
+# Combine coder samples (2-4) with (marked) overlap sample, shuffle rows, and write to csv as required by shiny app
+
+coder1 <- 
+  rbind(samp1 %>% select(id, text, entropy, legalese, entities, flesch) %>% mutate(overlap = T),
+                samp2 %>% select(id, text, entropy, legalese, entities, flesch) %>% mutate(overlap = F)) %>% 
+  slice_sample(prop = 1) # Shuffle rows
+
+coder2 <- 
+  rbind(samp1 %>% select(id, text, entropy, legalese, entities, flesch) %>% mutate(overlap = T),
+        samp3 %>% select(id, text, entropy, legalese, entities, flesch) %>% mutate(overlap = F)) %>% 
+  slice_sample(prop = 1) # Shuffle rows
+
+coder3 <- 
+  rbind(samp1 %>% select(id, text, entropy, legalese, entities, flesch) %>% mutate(overlap = T),
+        samp4 %>% select(id, text, entropy, legalese, entities, flesch) %>% mutate(overlap = F)) %>% 
+  slice_sample(prop = 1) # Shuffle rows
+
+
+
+coder1 %>% 
+  write.csv("./coder_samples/coder1texts.csv",
+          row.names = FALSE,    # don’t add row numbers
+          quote = TRUE)
+
+coder2 %>% 
+  write.csv("./coder_samples/coder2texts.csv",
             row.names = FALSE,    # don’t add row numbers
             quote = TRUE)
 
-s %>% 
-  slice_sample(prop = 1) %>% # Shuffle rows
-  write.csv("./CONSULT-Dim-Model/coder1texts.csv",
+coder3 %>% 
+  write.csv("./coder_samples/coder3texts.csv",
             row.names = FALSE,    # don’t add row numbers
             quote = TRUE)
 
 
-s %>% 
-  slice_sample(prop = 1) %>% # Shuffle rows
-  write.csv("./CONSULT-Dim-Model/coder2texts.csv",
-            row.names = FALSE,    # don’t add row numbers
-            quote = TRUE)
 
-s %>% 
-  slice_sample(prop = 1) %>% # Shuffle rows
-  write.csv("./CONSULT-Dim-Model/coder3texts.csv",
-            row.names = FALSE,    # don’t add row numbers
-            quote = TRUE)
