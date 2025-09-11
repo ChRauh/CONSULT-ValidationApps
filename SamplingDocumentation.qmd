@@ -1,48 +1,82 @@
-############################################################
-# Project:  COMM consult
-# Task:     Draw text samples for human coding / validation
-# Author:   @ChRauh (10.09.2025)
-############################################################
+---
+title: "COMM Consult validation data"
+subtitle: "Sampling texts for human coding"
+author:
+  - name: "Christian Rauh"
+    url: "http://www.christian-rauh.eu"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: false
+    code-fold: true            # add show/hide toggles above each code block
+    code-summary: "Show R code"  # text on the toggle button
+    code-tools: true           # adds copy/download buttons
+    code-copy: true
+    embed-resources: true      # <-- makes a single HTML file (images/CSS/JS inlined)
+    link-external-newwindow: true   # open external links in new tab
+    include-in-header:
+      text: |
+        <style>
+        /* Justify narrative text */
+        #quarto-content p,
+        #quarto-content li,
+        #quarto-content blockquote,
+        .callout .callout-body p,
+        .callout .callout-body li {
+          text-align: justify;
+          hyphens: auto;
+          -webkit-hyphens: auto;
+          -ms-hyphens: auto;
+        }
+        /* Keep headings and code non-justified */
+        #quarto-content h1, #quarto-content h2, #quarto-content h3,
+        #quarto-content h4, #quarto-content h5, #quarto-content h6 {
+          text-align: left;
+        }
+        #quarto-content pre,
+        #quarto-content code,
+        #quarto-content .sourceCode,
+        #quarto-content .cell-output pre {
+          text-align: left !important;
+        }
+        </style>
+execute:
+  echo: true                   # show code by default
+  eval: false                  # DO NOT RUN code 
+  warning: false
+  message: false
+  cache: false
+editor: source
+---
 
+# Purpose and setup
 
+We need to validate our text-based measures for 'information quality' of consultation responses against the assessments of human coders.
 
-# Context / setup ####
+Coding full texts is not possible - text length varies drastically and can span several pages of text. We thus agreed to let them code **shorter units (3-4 sentences)**. As we have no consistent formatting markers in the text data (such as paragraphs or line breaks), we decided to take the first few sentences of each contribution (typically containing the key messages) of individual consultation responses. In this context, we want to exclude the first sentence, as this often just informs about who the commenter is.
 
-# We need to validate our text-based measures for 'information quality' of consultation responses
-# against the assessments of human coders.
+We are able to hire three human coders who can code around ~ 600 units (based on testing coding for units of 3-4 sentences length). 
+We want to assess intercoder reliability as well, requiring us to generate an overlap sample seen by all coders, meaning that the targeted samples are the following:
 
-# Coding full texts is not possible - text length varies drastically and can span several pages of text
-# We thus agreed to let them code shorter units (3-4 sentences)
+* One 'overlap' sample of 100 text snippets (contained in all sets)   
+* Three separate/distinct samples of 500 text snippets (one for each coder)  
 
-# As we have no consistent formatting markers in the text data (such as paragraphs or line breaks),
-# we decided to take the first few sentences of each contribution (typically containing the key messages)
-# of consultation responses.
-# In this context, we want to exclude the first sentence, as  this often just informs about who the responder is.
+For each coder, these samples should cover the full breadth/variation of the text measures we want to validate, while also keeping the policy stage of the respective consultation balanced as this is the main analytic distinction in the manuscript.
 
-# We are able to hire three human coders who can code around ~ 600 units (based on testing coding for units of 3-4 sentences length)
+Accordingly, my work plan is as follows:
 
-# We want to assess intercoder reliability as well, requiring us to generat an overlap sample seen by all coders,
-# meaning the targeted samples are the following:
+1. Load full text data and extract text snippets
+2. (Re-) Calculate text measures for the snippets
+3. Draw the four stratified random samples (avoid duplicates across samples to maximize number of obs)
+4. Build and store three samples to be fed into the coding app (unique id, keep measured values, mark overlap obs)
 
-# One 'overlap' sample of 100 text snippets (contained in all sets)
-# Three seperate/distinct samples of 500 text snippets (one for each coder)
+All code is also available on **[GitHub](https://github.com/ChRauh/CONSULT-ValidationApps)**.
 
-# To get a valid measure while maximising variation across our measures, we go for stratified random samples.
-# The relevant strata are:
+The R packages used for this exercise:
 
-# Quintiles of the text based measures (Flesch reading ease, named entities, legal language - calculated for all text snippets before sampling)
-# Type of legislative procedure the Comm consults on (as this is the key analytical dimension in the analysis, var: policy_stage_short with three values)
-
-
-
-# Work plan ####
-
-# 1. Load full text data and extract text snippets
-# 2. (Re-) Calculate text measures for the snippets
-# 3. Draw the four stratified random samples (avoid duplicates across samples to maximise number of obs)
-# 4. Build and store three samples to be fed into the coding app (unique id, keep measure values, mark overlap obs)
-
-
+```{r}
 # Packages used #####
 library(tidyverse) # Easily Install and Load the 'Tidyverse' CRAN v2.0.0
 library(purrr) # Functional Programming Tools CRAN v1.0.4
@@ -54,9 +88,15 @@ library(spacyr) # Wrapper to the 'spaCy' 'NLP' Library CRAN v1.3.0
 library(sophistication) # https://github.com/kbenoit/sophistication
 library(patchwork) # The Composer of Plots CRAN v1.3.0
 
+```
+<br>
 
-# Load and prepare consultation data ####
+# Load and prepare feedback data
 
+* I use the latest data file from Dropbox
+* Dropping all observations with empty *\`text_full\`* observations
+
+```{r}
 # Using absolute path for now (Dropbox, WZB office machine)
 fbs <- read_rds("C:/Users/rauh/Dropbox/CR data/CommConsultText/Data/FeedbackTextData-Complete_new.rds")
 
@@ -73,8 +113,18 @@ fbs <- fbs %>%
   select(-c(starts_with("ne_"))) %>% # Drop individual entity counts
   mutate(entities =  entities/n_sentence) # Normalize NE sum to text length
 
+```
+<br>
+
+# Extraction of text snippets
+
+I took a **couple of choices here**:
+
+* Remove the first sentence of the comment - but only if overall comment is more than two sentences long
+* We want the human coders to see meaningful text (= full sentences), while avoiding overly long comments and preventing too much variation in the length of the snippets coders get to see: I selected **anything up to the sentence that contains the 200th word**.   
 
 
+```{r}
 # Extract text snippets for coding ####
 
 # Helper function
@@ -153,9 +203,35 @@ fbs$snippet_wc[i]
 # Intermediary saving
 write_rds(fbs, "./data/snippets.rds")
 
+```
+<br>
 
+Have a look at how long (number of words) the extracted snippets are:
 
+```{r}
+#| eval: true  
+#| message: false  # optional: silence messages
+#| warning: false  # optional: silence warnings
+library(tidyverse)
+read_rds("./data/snippets.rds") %>% 
+  ggplot(aes(x = snippet_wc))+
+  geom_density()+
+  labs(title = "Snippet lengths: Word count of text snippts across the full data set")+
+  theme_bw()
 
+```
+
+By construction, they cluster around the cutoff criterion of 200 words (or higher, for commenters using long sentences). But we also have a couple of (much) shorter ones in cases when commenters actually supplied (significantly) less than 200 words.
+
+While ultra-short observations should be probably excluded from human coding (see below), I think **we should allow some variation in this regard** (as these are real cases). The alternative would be to select only cases that have at least 200 words, then the coder samples would be more balanced regarding length.
+
+<br>
+
+# Calculate 'information quality' for snippets
+
+Then I extracted all the text-based measures we use in the full text analysis also for the short snippets (following the original code ). These data allow us later to offer the coders with texts that also vary sufficiently across the measures we want to validate.
+
+```{r}
 # Calculate text based measures for the snippets ####
 
 
@@ -268,9 +344,11 @@ for (i in 1:nrow(fbs)) {
 }
 close(progress_bar)
 
+```
 
+Let's quickly compare the distribution of our four information quality measures in the snippets to that observed in the full feedback texts:  
 
-
+```{r}
 # Compare distribution of text measures between full text and snippets ####
 
 
@@ -327,11 +405,28 @@ snips <- fbs %>% select(c(feedback_ref, policy_stage_short, starts_with("snippet
 write_rds(snips, "./data/snippets_indicators.rds")
 snips <- read_rds("./data/snippets_indicators.rds")
 
+```
+![](plots/TextMeasuresFullVsSnippets.png)
 
+Looks largely reasonable, with a few notable points:
 
-# Draw coding samples ####
+* **Entropy** differs strongly and is more constrained for the shorter snippets - somehow logical as shorter text limit the diversity of the vocabularly one can use. Still sufficient variation in the snippets for validation, but one should think about normalization in the main analysis (as we probably capture text length implicitly).
 
+* Fewer **entities** in the snippets - also reasonable with regard to text length and considering that we only look at the first few sentences. But also sufficient variation on offer for validation.
 
+* **Flesch** readability measure not capped as in the main analysis, done for the sampe below.
+<br>
+<br>
+
+# Draw coder samples
+
+Clean up the data on the *population* to draw from a little further along the above observations:
+
+* Keep only snippet based information
+* **Remove extremely short observations (< than 10 words)**
+* Clean up encoding errors in the raw texts (**should be done in main analyses as well!**)
+
+```{r}
 # Prepare population data
 pop <- snips %>% 
   select(feedback_ref, snippet, policy_stage_short, snippet_wc, snippet_entropy, snippet_flesch, snippet_entities, snippet_legalese) %>% 
@@ -354,6 +449,16 @@ pop <- pop %>%
          text = textclean::replace_non_ascii(text)) # Tackle (some) encoding issues - SHOULD BE DONE IN MAIN ANALYSES AS WELL!
 
 
+```
+
+Now for the tricky part - **random stratified samples of snippets such that**: 
+
+* the full variation of our text measures is seen by each coder
+* each coder gets a sample balanced as to the policy stage of the consultation (n = 500)
+* we have an overlap of n = 100 snippets across all three coders to study human reliability
+* avoid any other text duplicates in the data
+
+```{r}
 # Sampling
 # Reminder: Each coder should see 500 units that cover variation across all measures and balances the policy stages
 # Overlap sample of 100 obs with the same features
@@ -505,10 +610,14 @@ samp1 <- samples[[1]]  # 100 rows
 samp2 <- samples[[2]]  # 500 rows
 samp3 <- samples[[3]]  # 500 rows
 samp4 <- samples[[4]]  # 500 rows
+```
+<br>
 
+# Check sample properties
 
+To check whether stratified sampling has worked as planned, we can compare the distribution of our four text measures in the snippet population to that in each of the four samples (sample 1 is the smaller overlap sample for intercoder reliability):
 
-
+```{r}
 # Quick checks:
 lapply(list(samp1, samp2, samp3, samp4), \(x) count(x, stage) %>% mutate(p = n/sum(n)))
 lapply(list(samp1, samp2, samp3, samp4), \(x)
@@ -575,8 +684,15 @@ ggsave(
   filename = "./plots/MeasureDistributionInCoderSamples.png",
   width = 30, height = 25, units = "cm", dpi = 300
 )
+```
 
+![](plots/MeasureDistributionInCoderSamples.png)
 
+The n=100 overlap sample is a bit more off than the three n= 500 larger samples, but that doens't matter for our validation. **All in all, the samples for the human coders reflect the distribution in the full population rather well.**   
+<br>
+Then check, whether this also holds regarding the demanded **balance across policy stages**:
+
+```{r}
 # Visualize distribution across policy stages
 
 tag_stage <- function(df, src) df %>% transmute(source = src, stage)
@@ -621,8 +737,34 @@ ggsave(
   width = 30, height = 12, units = "cm", dpi = 300
 )
 
+```
 
+![](plots/PolicyStagesInCoderSamples.png)
 
+Good, almost perfectly balanced in each of the samples (while legislative proposal feedback is somewhat overrepresented in the full feedback data).    
+<br>
+
+Qualitative perspective - some **random sample snippets** of the type the coders will see:
+
+```{r}
+#| eval: true  
+#| message: false  # optional: silence messages
+#| warning: false  # optional: silence warnings
+library(tidyverse)
+library(kableExtra)
+read_rds("./data/snippets.rds") %>% 
+  select(snippet) %>% 
+  slice_sample(n = 10) %>% 
+  kable()
+```
+
+<br>
+
+# Final coder samples
+
+Now I combine each of the n=500 samples with the n=100 overlap sample (marked in the data), shuffle the rows in each, and export them as csv files that are later used as input for the coding app.
+
+```{r}
 # Finalize and export coder samples ####
 # Combine coder samples (2-4) with (marked) overlap sample, shuffle rows, and write to csv as required by shiny app
 
@@ -657,7 +799,20 @@ coder3 %>%
   write.csv("./coder_samples/coder3texts.csv",
             row.names = FALSE,    # don’t add row numbers
             quote = TRUE)
+```
 
+<br>
 
+**Done!**
 
+<br>
 
+# Notes for the main analyses
+
+* Many texts contain list items or annex tables that set off our text based measures (incorrect sentence tokenization). For list items that can be corrected, by replacing respective patterns (e.g. "; - ([a-z])") by sentence-end punctuation.
+
+* The *\`text_full\`* variable contains many encoding errors which should be corrected before measurement (e.g. by *\`mutate(text = iconv(text, from = "latin1", to = "UTF-8"), text = textclean::replace_non_ascii(text))\`*).
+
+* Think about entropy normalisation
+    
+    
