@@ -8,10 +8,10 @@ ui <- fluidPage(
     sidebarPanel(
       style = "text-align: justify;",
       h3("Instructions"),
-      p(HTML("<strong><u>Your role</strong></u></b>: Imagine you are a <b><i>bureaucratic official</b></i> who is supposed to draft a <b><i>new policy</b></i>. You want to make sure that this policy reflects <b><i>the best and most accurate information available</b></i>. Thus, you have shared your draft policy with potentially affected societal actors and asked for their <b><i>feedback</b></i>.")),
-      p(HTML("<strong><b><u>Your task</strong></u></b>: We show you excerpts from the stakeholder responses to your consultation. <em><b style='color: darkred;'>Rate how useful each comment excerpt is for helping you to take the best factual decision possible</b></em>. Ignore whether you agree with the stance or values expressed. Focus only on the <b><i>quality of information.</b></i>")),
+      p(HTML("<strong><u>Your role</strong></u></b>: Imagine you are a <b><i>bureaucratic official</b></i> who must draft a <b><i>new policy</b></i>. You want to make sure that this policy reflects <b><i>the best and most accurate information available</b></i>. Thus, you have shared your draft policy with potentially affected societal actors and asked for their <b><i>feedback</b></i> in a public consultation.")),
+      p(HTML("<strong><b><u>Your task</strong></u></b>: We show you excerpts from the stakeholder responses to your consultation. <em><b style='color: darkred;'>Rate how useful each comment excerpt is for helping you to take the best evidence-based decision possible</b></em>. Ignore whether you agree with the stance or values expressed. Focus only on the <b><i>quality of information</b></i> the comment provides.")),
       p(HTML("<strong><b><u>Guidance</strong></u></b>: High-quality information comes in many forms and we know that you have little context. There are no clear right or wrong answers - <b><i>only your interpretation in this scenario matters!</b></i>")),
-      p(HTML("Just judging by the text examples that you see on the right-hand side, <b><i>do you think that the feedback is valuable for an offcial who is trying to design and efficient and effective law?</b></i>")),
+      p(HTML("Just judging by the text examples that you see on the right-hand side, <b><i>do you think that the feedback is valuable for an official who is trying to take evidence-based decisions in designing an efficient and effective law?</b></i>")),
       p(HTML("To make your assessment easier, we split the task into more specific questions before asking for your overall assessment on whether this information could be useful for a bureaucratic policymaker.")),
       
       # tags$ul(style = "padding-left: 0; list-style-position: outside; text-align: match-parent;list-style-type: none;",
@@ -23,7 +23,7 @@ ui <- fluidPage(
       # p(HTML("There are no clear right or wrong answers - <b>your interpretation matters!</b>")),
       verbatimTextOutput("status"),
       p(HTML("Your assessments are saved on every text example. <b>You can close and later reload the app whenever you need a break.</b> Many thanks for your help!")),
-      p(HTML("We are happy to tell you more about the research context once the coding is done. If other questions occur, please do not hesitate to contact us via <a href=\"mailto:rauh@wzb.eu\">Email</a>."))
+      p(HTML("We are happy to provide more information about the research context once the coding is complete. If you have any further questions, please do not hesitate to contact us via <a href=\"mailto:rauh@wzb.eu\">Email</a>."))
     ),
     
     mainPanel(
@@ -42,41 +42,44 @@ ui <- fluidPage(
       div(
         # First set of radio buttons
         radioButtons("classification1", 
-                     HTML("<b><u>Relevance</u></b>: Does the comment appear as vague or off-topic or does it directly address a regulatory issue?"),
+                     HTML("<b>Low or high <u>relevance</u>?</b>&nbsp;&nbsp;&nbsp;<span style=\"color: #bbb;\">Comments may appear as vague or off-topic or they can directly address a regulatory issue</span>"),
                      choices = c("Very low", "Rather low", "Moderate", "Rather high", "Very high"), 
                      inline = TRUE,
                      selected = character(0)),
         
         # Second set of radio buttons
         radioButtons("classification2", 
-                     HTML("<b><u>Richness</u></b>: Is the comment rather simplistic and limited or does it provide much information?"),
+                     HTML("<b>Low or high <u>information richness</u>?</b>&nbsp;&nbsp;&nbsp;<span style=\"color: #bbb;\">Comments may be rather simplistic and limited or they provide a lot of information</span>"),
                      choices = c("Very low", "Rather low", "Moderate", "Rather high", "Very high"), 
                      inline = TRUE,
                      selected = character(0)),
         
         # Third set of radio buttons
         radioButtons("classification3", 
-                     HTML("<b><u>Analytic quality</u></b>: Is this mostly opinion and anecdote or does it provide clear arguments as well as factual and checkable claims?"),
+                     HTML("<b>Low or high <u>analytic quality</u>?</b>&nbsp;&nbsp;&nbsp;<span style=\"color: #bbb;\">Comments may be mostly opinion and anecdote or they can provide clear arguments and checkable claims</span>"),
                      choices = c("Very low", "Rather low", "Moderate", "Rather high", "Very high"), 
                      inline = TRUE,
                      selected = character(0)),
         
         # Fourth set of radio buttons
         radioButtons("classification4", 
-                     HTML("<b><u>Specificity</u></b>: Is the comment rather general and unspecific or does it provide concrete and detailed information useful for legal policymaking?"),
+                     HTML("<b>Low or high <u>specificity</u>?</b>&nbsp;&nbsp;&nbsp;<span style=\"color: #bbb;\">Comments may be rather general and unspecific or provide concrete and detailed information for policymaking</span>"),
                      choices = c("Very low", "Rather low", "Moderate", "Rather high", "Very high"), 
                      inline = TRUE,
                      selected = character(0)),
         
         # Fifth set of radio buttons
         radioButtons("classification5", 
-                     HTML("<b><u>Overall information quality</u></b>: How useful is the comment for an offcial who is trying to design an efficient and effective law?"),
+                     HTML("<b>Low or high <u>information quality overall</u>?</b>&nbsp;&nbsp;&nbsp;<span style=\"color: #bbb;\">Comments may be hardly or very useful an official trying to make evidence-based decisions</span>"),
                      choices = c("Very low", "Rather low", "Moderate", "Rather high", "Very high"), 
                      inline = TRUE,
                      selected = character(0)),
         
         # Continue button
-        actionButton("next_btn", "Continue", style = "margin-top: 10px; background-color: #4CAF50; color: white;")
+        actionButton("next_btn", "Continue", style = "margin-top: 10px; background-color: #4CAF50; color: white;"),
+        HTML("<br>"),
+        HTML("<br>"),
+        HTML("<br>")
       ),
       
       # Add custom CSS for the text frame
@@ -111,7 +114,7 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   # Load the text data from a local file only once at the start
-  coder <- 0
+  coder <- 1
   textfile <- paste0("coder", coder, "texts.csv")
   text_data <- read.csv(textfile, stringsAsFactors = FALSE)
   
